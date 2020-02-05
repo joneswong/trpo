@@ -54,7 +54,7 @@ def discrete2box4obj(x, discrete_space, box_space):
     return ret
 
 def discrete2box4class(discrete_space):
-    return Box(0.0, 1.0, discrete_space.n)
+    return Box(0.0, 1.0, [discrete_space.n])
 
 def ident4obj(x, old_space_obj, new_space_obj):
     return x
@@ -69,7 +69,7 @@ class SpaceConversionEnv(Env):
         self._env = env
         self.action_convert = None
         self.observation_convert = None
-        for pairs, convert in self.convertable.iteritems():
+        for pairs, convert in self.convertable.items():
             if env.action_space.__class__ == pairs[0] and \
                target_action_space == pairs[1] and \
                self.action_convert is None:
@@ -102,11 +102,11 @@ class SpaceConversionEnv(Env):
         step = self._env.step(conv_action, **kwargs)
         observation, reward, done, info = step
 
-        conv_observation = self.observation_convert(observation, self._env.observation_space, self.observation_space)  
+        conv_observation = self.observation_convert(observation, self._env.observation_space, self.observation_space)
 
         if self._verbose and self.observation_convert != ident4obj:
             print("Input observation: %s, converted observation: %s" % (observation, conv_observation))
-        return conv_observation, reward, done, {}
+        return conv_observation, reward, done, info
 
     def reset(self, **kwargs):
         observation = self._env.reset(**kwargs)

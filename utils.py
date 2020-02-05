@@ -19,11 +19,11 @@ def rollout(env, agent, max_pathlength, n_timesteps):
     paths = []
     timesteps_sofar = 0
     while timesteps_sofar < n_timesteps:
-        obs, actions, rewards, action_dists = [], [], [], []
+        obs, actions, rewards, constraints, action_dists = [], [], [], [], []
         ob = env.reset()
         agent.prev_action *= 0.0
         agent.prev_obs *= 0.0
-        for _ in xrange(max_pathlength):
+        for _ in range(max_pathlength):
             action, action_dist, ob = agent.act(ob)
             obs.append(ob)
             actions.append(action)
@@ -31,11 +31,15 @@ def rollout(env, agent, max_pathlength, n_timesteps):
             res = env.step(action)
             ob = res[0]
             rewards.append(res[1])
+            if res[3] and "c0" in res[3]:
+                constraints.append(res[3]["c0"])
             if res[2]:
                 path = {"obs": np.concatenate(np.expand_dims(obs, 0)),
                         "action_dists": np.concatenate(action_dists),
                         "rewards": np.array(rewards),
                         "actions": np.array(actions)}
+                if constraints:
+                    path["constraints"] = np.asarray(constraints)
                 paths.append(path)
                 agent.prev_action *= 0.0
                 agent.prev_obs *= 0.0
@@ -95,7 +99,7 @@ def cat_sample(prob_nk):
     N = prob_nk.shape[0]
     csprob_nk = np.cumsum(prob_nk, axis=1)
     out = np.zeros(N, dtype='i')
-    for (n, csprob_k, r) in zip(xrange(N), csprob_nk, np.random.rand(N)):
+    for (n, csprob_k, r) in zip(range(N), csprob_nk, np.random.rand(N)):
         for (k, csprob) in enumerate(csprob_k):
             if csprob > r:
                 out[n] = k
@@ -116,8 +120,11 @@ def numel(x):
 
 def flatgrad(loss, var_list):
     grads = tf.gradients(loss, var_list)
-    return tf.concat(0, [tf.reshape(grad, [numel(v)])
-                         for (v, grad) in zip(var_list, grads)])
+    #return tf.concat(0, [tf.reshape(grad, [numel(v)])
+    #                    for (v, grad) in zip(var_list, grads)])
+    return tf.concat([tf.reshape(grad, [numel(v)])
+                      for (v, grad) in zip(var_list, grads)], 0)
+
 
 
 class SetFromFlat(object):
@@ -125,12 +132,15 @@ class SetFromFlat(object):
     def __init__(self, session, var_list):
         self.session = session
         assigns = []
-        shapes = map(var_shape, var_list)
+        #shapes = map(var_shape, var_list)
+        shapes = [var_shape(x) for x in var_list]
         total_size = sum(np.prod(shape) for shape in shapes)
         self.theta = theta = tf.placeholder(dtype, [total_size])
         start = 0
         assigns = []
         for (shape, v) in zip(shapes, var_list):
+            print(shape)
+            print(v)
             size = np.prod(shape)
             assigns.append(
                 tf.assign(
@@ -141,6 +151,7 @@ class SetFromFlat(object):
                             size],
                         shape)))
             start += size
+        print(len(assigns))
         self.op = tf.group(*assigns)
 
     def __call__(self, theta):
@@ -151,7 +162,7 @@ class GetFlat(object):
 
     def __init__(self, session, var_list):
         self.session = session
-        self.op = tf.concat(0, [tf.reshape(v, [numel(v)]) for v in var_list])
+        self.op = tf.concat([tf.reshape(v, [numel(v)]) for v in var_list], 0)
 
     def __call__(self):
         return self.op.eval(session=self.session)
@@ -186,7 +197,7 @@ def conjugate_gradient(f_Ax, b, cg_iters=10, residual_tol=1e-10):
     r = b.copy()
     x = np.zeros_like(b)
     rdotr = r.dot(r)
-    for i in xrange(cg_iters):
+    for i in range(cg_iters):
         z = f_Ax(p)
         v = rdotr / p.dot(z)
         x += v * p

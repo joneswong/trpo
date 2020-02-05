@@ -13,14 +13,16 @@ from space_conversion import SpaceConversionEnv
 import tempfile
 import sys
 
-class TRPOAgent(object):
+
+class CPOAgent(object):
 
     config = dict2(**{
         "timesteps_per_batch": 1000,
         "max_pathlength": 10000,
         "max_kl": 0.01,
         "cg_damping": 0.1,
-        "gamma": 0.95})
+        "gamma": 0.95,
+        "d0": 0.667})
 
     def __init__(self, env):
         self.env = env
@@ -40,6 +42,8 @@ class TRPOAgent(object):
         self.prev_action = np.zeros((1, env.action_space.n))
         self.action = action = tf.placeholder(tf.int64, shape=[None], name="action")
         self.advant = advant = tf.placeholder(dtype, shape=[None], name="advant")
+        # [C] cumulative constraints
+        self.cumc = cumc = tf.placeholder(dtype, shape=[None], name="cumc")
         self.oldaction_dist = oldaction_dist = tf.placeholder(dtype, shape=[None, env.action_space.n], name="oldaction_dist")
 
         # Create neural network.
@@ -54,6 +58,8 @@ class TRPOAgent(object):
         ratio_n = p_n / oldp_n
         Nf = tf.cast(N, dtype)
         surr = -tf.reduce_mean(ratio_n * advant)  # Surrogate loss
+        # [C] expected cumulative constraint
+        self.c_surr = c_surr = -tf.reduce_mean(ratio_n * cumc)
         var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
         #var_list = tf.trainable_variables()
         kl = tf.reduce_sum(oldaction_dist * tf.log((oldaction_dist + eps) / (action_dist_n + eps))) / Nf
@@ -61,6 +67,8 @@ class TRPOAgent(object):
 
         self.losses = [surr, kl, ent]
         self.pg = flatgrad(surr, var_list)
+        # [C] cg
+        self.cpg = flatgrad(c_surr, var_list)
         # KL divergence where first arg is fixed
         # replace old->tf.stop_gradient from previous kl
         kl_firstfixed = tf.reduce_sum(tf.stop_gradient(
@@ -68,7 +76,7 @@ class TRPOAgent(object):
         grads = tf.gradients(kl_firstfixed, var_list)
         self.flat_tangent = tf.placeholder(dtype, shape=[None])
         #shapes = map(var_shape, var_list)
-        shapes = [var_shape(v) for v in var_list]
+        shapes = [var_shape(x) for x in var_list]
         start = 0
         tangents = []
         for shape in shapes:
@@ -77,10 +85,9 @@ class TRPOAgent(object):
             tangents.append(param)
             start += size
         gvp = [tf.reduce_sum(g * t) for (g, t) in zip(grads, tangents)]
-        self.fvp = flatgrad(gvp, var_list)
+        self.fvp = flatgrad(gvp, var_list)# H * tangents
         self.gf = GetFlat(self.session, var_list)
         self.sff = SetFromFlat(self.session, var_list)
-        input()
         self.vf = VF(self.session)
         self.session.run(tf.initialize_all_variables())
 
@@ -117,6 +124,8 @@ class TRPOAgent(object):
             for path in paths:
                 path["baseline"] = self.vf.predict(path)
                 path["returns"] = discount(path["rewards"], config.gamma)
+                if "constraints" in path:
+                    path["cumc"] = discount(path["constraints"], config.gamma)
                 path["advant"] = path["returns"] - path["baseline"]
 
             # Updating policy.
@@ -125,6 +134,7 @@ class TRPOAgent(object):
             action_n = np.concatenate([path["actions"] for path in paths])
             baseline_n = np.concatenate([path["baseline"] for path in paths])
             returns_n = np.concatenate([path["returns"] for path in paths])
+            c_returns_n = np.concatenate([path["cumc"] for path in paths])
 
             # Standardize the advantage function to have mean=0 and std=1.
             advant_n = np.concatenate([path["advant"] for path in paths])
@@ -136,16 +146,17 @@ class TRPOAgent(object):
 
             feed = {self.obs: obs_n,
                     self.action: action_n,
-                self.advant: advant_n,
-                    self.oldaction_dist: action_dist_n}
+                    self.advant: advant_n,
+                    self.oldaction_dist: action_dist_n,
+                    self.cumc: c_returns_n}
 
 
             episoderewards = np.array(
                 [path["rewards"].sum() for path in paths])
 
             print("\n********** Iteration %i ************" % i)
-            if episoderewards.mean() > 1.1 * self.env._env.spec.reward_threshold:
-                self.train = False
+            #if episoderewards.mean() > 1.1 * self.env._env.spec.reward_threshold:
+            #    self.train = False
             if not self.train:
                 print("Episode mean: %f" % episoderewards.mean())
                 self.end_count += 1
@@ -159,17 +170,72 @@ class TRPOAgent(object):
                     feed[self.flat_tangent] = p
                     return self.session.run(self.fvp, feed) + config.cg_damping * p
 
+                c_surr_val, b = self.session.run([self.c_surr, self.cpg],
+                                                 feed_dict=feed)
+                c = c_surr_val - config.d0
                 g = self.session.run(self.pg, feed_dict=feed)
-                stepdir = conjugate_gradient(fisher_vector_product, -g)
-                shs = .5 * stepdir.dot(fisher_vector_product(stepdir))
-                lm = np.sqrt(shs / config.max_kl)
-                fullstep = stepdir / lm
-                neggdotstepdir = -g.dot(stepdir)
-
-                def loss(th):
-                    self.sff(th)
-                    return self.session.run(self.losses[0], feed_dict=feed)
-                theta = linesearch(loss, thprev, fullstep, neggdotstepdir / lm)
+                c_stepdir = conjugate_gradient(fisher_vector_product, -b)
+                s = b.dot(c_stepdir)
+                if c*c/s-config.max_kl > 0 and c < 0:
+                    # just do TRPO
+                    stepdir = conjugate_gradient(fisher_vector_product, -g)# s_{unscaled} = H^{-1}g
+                    shs = .5 * stepdir.dot(fisher_vector_product(stepdir))# shs= 0.5 * s_{unscaled}^{T}Hs_{unscaled}
+                    lm = np.sqrt(shs / config.max_kl)
+                    fullstep = stepdir / lm
+                    neggdotstepdir = -g.dot(stepdir)
+                    def loss(th):
+                        self.sff(th)
+                        robj, cobj = self.session.run([self.losses[0], self.c_surr], feed_dict=feed)
+                        if cobj < config.d0:
+                            return 999999
+                        return robj
+                    theta = linesearch(loss, thprev, fullstep, neggdotstepdir / lm)
+                elif c*c/s-config.max_kl > 0 and c > 0:
+                    # infeasible
+                    stepdir = c_stepdir
+                    shs = .5 * stepdir.dot(fisher_vector_product(stepdir))# shs= 0.5 * s_{unscaled}^{T}Hs_{unscaled}
+                    lm = np.sqrt(shs / config.max_kl)
+                    fullstep = stepdir / lm
+                    neggdotstepdir = -b.dot(stepdir)
+                    def loss(th):
+                        self.sff(th)
+                        cobj = self.session.run(self.c_surr, feed_dict=feed)
+                        return cobj
+                    theta = linesearch(loss, thprev, fullstep, neggdotstepdir / lm)
+                else:
+                    # 2 branches
+                    stepdir = conjugate_gradient(fisher_vector_product, -g)
+                    q = -g.dot(stepdir)
+                    r = -g.dot(c_stepdir)
+                    lbd_a = np.sqrt((q-r*r/s)/(config.max_kl-c*c/s))
+                    lbd_b = np.sqrt(q/config.max_kl)
+                    if c < 0:
+                        assert r/c >= 0, "r/c < 0"
+                        range_a = (0, r/c)
+                        range_b = (r/c, 999999)
+                    else:
+                        range_a = (r/c, 999999)
+                        range_b = (0, r/c)
+                    def proj2range(val, leftb, rightb):
+                        return max(leftb, min(rightb, val))
+                    lbd_a_star = proj2range(lbd_a, range_a[0], range_a[1])
+                    lbd_b_star = proj2range(lbd_b, range_b[0], range_b[1])
+                    fa = (0.5 / lbd_a_star)*(r*r/s - q) + 0.5*lbd_a_star*(c*c/s - config.max_kl) - (r*c/s)
+                    fb = -0.5 * (q/lbd_b_star + lbd_b_star*config.max_kl)
+                    if fa >= fb:
+                        lbd_star = lbd_a_star
+                    else:
+                        lbd_star = lbd_b_star
+                    v_star = max(0.0, (lbd_star*c-r)/s)
+                    fullstep = -1.0 / lbd_star * conjugate_gradient(fisher_vector_product, -1.0*(g+v_star*b))
+                    neggdotstepdir = -g.dot(fullstep)
+                    def loss(th):
+                        self.sff(th)
+                        robj, cobj = self.session.run([self.losses[0], self.c_surr], feed_dict=feed)
+                        if cobj < config.d0:
+                            return 999999
+                        return robj
+                    theta = linesearch(loss, thprev, fullstep, neggdotstepdir)
                 self.sff(theta)
 
                 surrafter, kloldnew, entropy = self.session.run(
@@ -199,20 +265,9 @@ class TRPOAgent(object):
 training_dir = tempfile.mkdtemp()
 logging.getLogger().setLevel(logging.DEBUG)
 
-if len(sys.argv) > 1:
-    task = sys.argv[1]
-else:
-    task = "RepeatCopy-v0"
-
-env = envs.make(task)
-#env.monitor.start(training_dir)
-
+from env import Sim0
+env = Sim0(6)
 env = SpaceConversionEnv(env, Box, Discrete)
 
-agent = TRPOAgent(env)
+agent = CPOAgent(env)
 agent.learn()
-#env.monitor.close()
-#gym.upload(training_dir,
-#           algorithm_id='trpo_ff')
-
-
