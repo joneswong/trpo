@@ -19,7 +19,15 @@ class Sim0(gym.Env):
 
     def step(self, act):
         reward = np.sum(self.rw[act] * self.context)
-        constraint = np.sum(self.cw[act] * (1.0-self.context))
+        constraint = -1.0 * np.sum(self.cw[act] * (1.0-self.context))
         next_ob = np.random.rand(self._num_arms)
         done = True
         return next_ob, reward, done, {"c0": constraint}
+
+
+if __name__=="__main__":
+    env = Sim0(6)
+    ob = env.reset()
+    for _ in range(100):
+        next_ob, rwd, done, info = env.step(env.action_space.sample())
+        print("{} v.s. {}".format(rwd, info["c0"]))

@@ -22,7 +22,7 @@ class CPOAgent(object):
         "max_kl": 0.01,
         "cg_damping": 0.1,
         "gamma": 0.95,
-        "d0": 0.667})
+        "d0": -0.667})
 
     def __init__(self, env):
         self.env = env
@@ -47,6 +47,7 @@ class CPOAgent(object):
         self.oldaction_dist = oldaction_dist = tf.placeholder(dtype, shape=[None, env.action_space.n], name="oldaction_dist")
 
         # Create neural network.
+        # action_dist_n is softmax normalized
         action_dist_n, _ = (pt.wrap(self.obs).
                             fully_connected(64, activation_fn=tf.nn.tanh).
                             softmax_classifier(env.action_space.n))
@@ -153,9 +154,11 @@ class CPOAgent(object):
 
             episoderewards = np.array(
                 [path["rewards"].sum() for path in paths])
+            episodeconstraints = np.array(
+                [path["constraints"].sum() for path in paths])
 
             print("\n********** Iteration %i ************" % i)
-            #if episoderewards.mean() > 1.1 * self.env._env.spec.reward_threshold:
+            #if episoderewards.mean() > 0.95*(1.0-(-1.0*config.d0)) and episodeconstraints.mean() <= config.d0:
             #    self.train = False
             if not self.train:
                 print("Episode mean: %f" % episoderewards.mean())
@@ -172,10 +175,10 @@ class CPOAgent(object):
 
                 c_surr_val, b = self.session.run([self.c_surr, self.cpg],
                                                  feed_dict=feed)
-                c = c_surr_val - config.d0
+                c = (-c_surr_val) - config.d0
                 g = self.session.run(self.pg, feed_dict=feed)
                 c_stepdir = conjugate_gradient(fisher_vector_product, -b)
-                s = b.dot(c_stepdir)
+                s = -b.dot(c_stepdir)
                 if c*c/s-config.max_kl > 0 and c < 0:
                     # just do TRPO
                     stepdir = conjugate_gradient(fisher_vector_product, -g)# s_{unscaled} = H^{-1}g
@@ -186,7 +189,7 @@ class CPOAgent(object):
                     def loss(th):
                         self.sff(th)
                         robj, cobj = self.session.run([self.losses[0], self.c_surr], feed_dict=feed)
-                        if cobj < config.d0:
+                        if cobj > config.d0:
                             return 999999
                         return robj
                     theta = linesearch(loss, thprev, fullstep, neggdotstepdir / lm)
@@ -200,8 +203,8 @@ class CPOAgent(object):
                     def loss(th):
                         self.sff(th)
                         cobj = self.session.run(self.c_surr, feed_dict=feed)
-                        return cobj
-                    theta = linesearch(loss, thprev, fullstep, neggdotstepdir / lm)
+                        return -cobj
+                    theta = linesearch(loss, thprev, -fullstep, neggdotstepdir / lm)
                 else:
                     # 2 branches
                     stepdir = conjugate_gradient(fisher_vector_product, -g)
@@ -209,19 +212,35 @@ class CPOAgent(object):
                     r = -g.dot(c_stepdir)
                     lbd_a = np.sqrt((q-r*r/s)/(config.max_kl-c*c/s))
                     lbd_b = np.sqrt(q/config.max_kl)
+                    """
                     if c < 0:
-                        assert r/c >= 0, "r/c < 0"
+                        assert r/c >= 0, "r / c = {} / {} = {}".format(r, c, r/c)
                         range_a = (0, r/c)
                         range_b = (r/c, 999999)
                     else:
                         range_a = (r/c, 999999)
                         range_b = (0, r/c)
+                    """
+                    if c < 0:
+                        range_a = (0, r/c)
+                        range_b = (max(0, r/c), 999999)
+                    else:
+                        range_a = (max(0, r/c), 999999)
+                        range_b = (0, r/c)
                     def proj2range(val, leftb, rightb):
                         return max(leftb, min(rightb, val))
-                    lbd_a_star = proj2range(lbd_a, range_a[0], range_a[1])
-                    lbd_b_star = proj2range(lbd_b, range_b[0], range_b[1])
-                    fa = (0.5 / lbd_a_star)*(r*r/s - q) + 0.5*lbd_a_star*(c*c/s - config.max_kl) - (r*c/s)
-                    fb = -0.5 * (q/lbd_b_star + lbd_b_star*config.max_kl)
+                    if range_a[0] < range_a[1]:
+                        lbd_a_star = proj2range(lbd_a, range_a[0], range_a[1])
+                        fa = (0.5 / lbd_a_star)*(r*r/s - q) + 0.5*lbd_a_star*(c*c/s - config.max_kl) - (r*c/s)
+                    else:
+                        lbd_a_star = None
+                        fa = -999999
+                    if range_b[0] < range_b[1]:
+                        lbd_b_star = proj2range(lbd_b, range_b[0], range_b[1])
+                        fb = -0.5 * (q/lbd_b_star + lbd_b_star*config.max_kl)
+                    else:
+                        lbd_b_star = None
+                        fb = -999999
                     if fa >= fb:
                         lbd_star = lbd_a_star
                     else:
@@ -232,7 +251,7 @@ class CPOAgent(object):
                     def loss(th):
                         self.sff(th)
                         robj, cobj = self.session.run([self.losses[0], self.c_surr], feed_dict=feed)
-                        if cobj < config.d0:
+                        if -cobj > config.d0:
                             return 999999
                         return robj
                     theta = linesearch(loss, thprev, fullstep, neggdotstepdir)
@@ -241,6 +260,8 @@ class CPOAgent(object):
                 surrafter, kloldnew, entropy = self.session.run(
                     self.losses, feed_dict=feed)
                 if kloldnew > 2.0 * config.max_kl:
+                    print("reset \\theta")
+                    input()
                     self.sff(thprev)
 
                 stats = {}
@@ -248,6 +269,7 @@ class CPOAgent(object):
                 numeptotal += len(episoderewards)
                 stats["Total number of episodes"] = numeptotal
                 stats["Average sum of rewards per episode"] = episoderewards.mean()
+                stats["Average sum of constraints perepisode"] = episodeconstraints.mean()
                 stats["Entropy"] = entropy
                 exp = explained_variance(np.array(baseline_n), np.array(returns_n))
                 stats["Baseline explained"] = exp

@@ -136,7 +136,7 @@ class TRPOAgent(object):
 
             feed = {self.obs: obs_n,
                     self.action: action_n,
-                self.advant: advant_n,
+                    self.advant: advant_n,
                     self.oldaction_dist: action_dist_n}
 
 
