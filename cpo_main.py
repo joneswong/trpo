@@ -1,3 +1,4 @@
+import argparse
 from utils import *
 import numpy as np
 import random
@@ -13,6 +14,14 @@ from space_conversion import SpaceConversionEnv
 import tempfile
 import sys
 
+parser = argparse.ArgumentParser("cpo")
+parser.add_argument("--logfile", type=str, default="", help="path of log file")
+parser.add_argument("--seed", type=int, default=123, help="")
+parser.add_argument("--level", type=int, default=0, help="")
+parser.add_argument("--max_episode_len", type=int, default=3, help="")
+parser.add_argument("--threshold", type=float, default=-1.5, help="")
+args=parser.parse_args()
+
 
 class CPOAgent(object):
 
@@ -21,8 +30,8 @@ class CPOAgent(object):
         "max_pathlength": 10000,
         "max_kl": 0.01,
         "cg_damping": 0.1,
-        "gamma": 0.95,
-        "d0": -0.667})
+        "gamma": .95,
+        "d0": args.threshold})#-0.667})
 
     def __init__(self, env):
         self.env = env
@@ -57,6 +66,7 @@ class CPOAgent(object):
         p_n = slice_2d(action_dist_n, tf.range(0, N), action)
         oldp_n = slice_2d(oldaction_dist, tf.range(0, N), action)
         ratio_n = p_n / oldp_n
+        self.ratio_n = ratio_n
         Nf = tf.cast(N, dtype)
         surr = -tf.reduce_mean(ratio_n * advant)  # Surrogate loss
         # [C] expected cumulative constraint
@@ -112,7 +122,11 @@ class CPOAgent(object):
         start_time = time.time()
         numeptotal = 0
         i = 0
-        while True:
+        #while True:
+        ops = open(args.logfile, 'w')
+        eprewards = list()
+        epconstraints = list()
+        while numeptotal < 30000:
             # Generating paths.
             print("Rollout")
             paths = rollout(
@@ -157,6 +171,15 @@ class CPOAgent(object):
             episodeconstraints = np.array(
                 [path["constraints"].sum() for path in paths])
 
+            meansteprwd = np.array(
+                [path["rewards"].mean() for path in paths])
+            eprewards.extend(meansteprwd.tolist())
+            epconstraints.extend(episodeconstraints.tolist())
+            if len(eprewards) >= 500:
+                ops.write("{}\t{}\n".format(np.mean(eprewards[:500]), -1.0*np.mean(epconstraints[:500])))
+                del eprewards[:500]
+                del epconstraints[:500]
+
             print("\n********** Iteration %i ************" % i)
             #if episoderewards.mean() > 0.95*(1.0-(-1.0*config.d0)) and episodeconstraints.mean() <= config.d0:
             #    self.train = False
@@ -173,12 +196,13 @@ class CPOAgent(object):
                     feed[self.flat_tangent] = p
                     return self.session.run(self.fvp, feed) + config.cg_damping * p
 
-                c_surr_val, b = self.session.run([self.c_surr, self.cpg],
-                                                 feed_dict=feed)
+                c_surr_val, b, ratio_n_val = self.session.run([self.c_surr, self.cpg, self.ratio_n],
+                                                              feed_dict=feed)
                 c = (-c_surr_val) - config.d0
                 g = self.session.run(self.pg, feed_dict=feed)
                 c_stepdir = conjugate_gradient(fisher_vector_product, -b)
                 s = -b.dot(c_stepdir)
+                assert s > 0, "invalid positive definite quadratic form"
                 if c*c/s-config.max_kl > 0 and c < 0:
                     # just do TRPO
                     stepdir = conjugate_gradient(fisher_vector_product, -g)# s_{unscaled} = H^{-1}g
@@ -212,15 +236,6 @@ class CPOAgent(object):
                     r = -g.dot(c_stepdir)
                     lbd_a = np.sqrt((q-r*r/s)/(config.max_kl-c*c/s))
                     lbd_b = np.sqrt(q/config.max_kl)
-                    """
-                    if c < 0:
-                        assert r/c >= 0, "r / c = {} / {} = {}".format(r, c, r/c)
-                        range_a = (0, r/c)
-                        range_b = (r/c, 999999)
-                    else:
-                        range_a = (r/c, 999999)
-                        range_b = (0, r/c)
-                    """
                     if c < 0:
                         range_a = (0, r/c)
                         range_b = (max(0, r/c), 999999)
@@ -246,6 +261,12 @@ class CPOAgent(object):
                     else:
                         lbd_star = lbd_b_star
                     v_star = max(0.0, (lbd_star*c-r)/s)
+                    #print("{}\t{}".format(fa, fb))
+                    #print("{}\t{}\t{}\t{}".format(lbd_star, c, r, v_star))
+                    #input()
+                    #print(c_surr_val)
+                    #print(ratio_n_val)
+                    #input()
                     fullstep = -1.0 / lbd_star * conjugate_gradient(fisher_vector_product, -1.0*(g+v_star*b))
                     neggdotstepdir = -g.dot(fullstep)
                     def loss(th):
@@ -261,7 +282,6 @@ class CPOAgent(object):
                     self.losses, feed_dict=feed)
                 if kloldnew > 2.0 * config.max_kl:
                     print("reset \\theta")
-                    input()
                     self.sff(thprev)
 
                 stats = {}
@@ -283,12 +303,20 @@ class CPOAgent(object):
                 if exp > 0.8:
                     self.train = False
             i += 1
+        ops.close()
 
 training_dir = tempfile.mkdtemp()
 logging.getLogger().setLevel(logging.DEBUG)
 
-from env import Sim0
-env = Sim0(6)
+#from env import Sim0
+#env = Sim0(6)
+from i2rs.envs import Sim0, Sim2, Sim3
+if args.level == 0:
+    env = Sim0(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+elif args.level ==2:
+    env = Sim2(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+elif args.level ==3:
+    env = Sim3(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
 env = SpaceConversionEnv(env, Box, Discrete)
 
 agent = CPOAgent(env)

@@ -219,3 +219,8 @@ def explained_variance(ypred, y):
     assert y.ndim == 1 and ypred.ndim == 1
     vary = np.var(y)
     return np.nan if vary==0 else 1 - np.var(y-ypred)/vary
+
+if __name__=="__main__":
+    a = np.asarray([0, 0, 0, -1], dtype=np.float32)
+    b = discount(a, .95)
+    print(b)
