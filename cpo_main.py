@@ -19,6 +19,7 @@ parser.add_argument("--logfile", type=str, default="", help="path of log file")
 parser.add_argument("--seed", type=int, default=123, help="")
 parser.add_argument("--level", type=int, default=0, help="")
 parser.add_argument("--max_episode_len", type=int, default=3, help="")
+parser.add_argument("--num_pvs", type=int, default=30000, help="")
 parser.add_argument("--threshold", type=float, default=-1.5, help="")
 args=parser.parse_args()
 
@@ -126,7 +127,7 @@ class CPOAgent(object):
         ops = open(args.logfile, 'w')
         eprewards = list()
         epconstraints = list()
-        while numeptotal < 30000:
+        while numeptotal < args.num_pvs:
             # Generating paths.
             print("Rollout")
             paths = rollout(
@@ -310,13 +311,20 @@ logging.getLogger().setLevel(logging.DEBUG)
 
 #from env import Sim0
 #env = Sim0(6)
-from i2rs.envs import Sim0, Sim2, Sim3
+from i2rs.envs import Sim0, Sim2, Sim3, Sim4, Sim7
 if args.level == 0:
     env = Sim0(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
 elif args.level ==2:
     env = Sim2(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
 elif args.level ==3:
     env = Sim3(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+elif args.level == 4:
+    env = Sim4(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+elif args.level == 7:
+    env = Sim7(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+elif args.level == 10:
+    from i2rs.envs import FlowControlSimulator
+    env = FlowControlSimulator("/root/I2RS/search_logs.tsv", seed=args.seed, negate_c=True)
 env = SpaceConversionEnv(env, Box, Discrete)
 
 agent = CPOAgent(env)

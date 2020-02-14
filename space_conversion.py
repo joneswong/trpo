@@ -9,7 +9,7 @@ from gym import Env
 
 
 def box2box4obj(x, old_space_obj, new_space_obj):
-    assert(old_space_obj.contains(x))
+    assert(old_space_obj.contains(x)), "{} vs {}".format(old_space_obj, x)
     action = np.reshape(x, new_space_obj.shape)
     assert(new_space_obj.contains(action))
     return action
