@@ -17,6 +17,7 @@ import sys
 parser = argparse.ArgumentParser("cpo")
 parser.add_argument("--logfile", type=str, default="", help="path of log file")
 parser.add_argument("--seed", type=int, default=123, help="")
+parser.add_argument("--gamma", type=float, default=0.999, help="")
 parser.add_argument("--level", type=int, default=0, help="")
 parser.add_argument("--max_episode_len", type=int, default=3, help="")
 parser.add_argument("--num_pvs", type=int, default=30000, help="")
@@ -31,7 +32,7 @@ class CPOAgent(object):
         "max_pathlength": 10000,
         "max_kl": 0.01,
         "cg_damping": 0.1,
-        "gamma": .95,
+        "gamma": args.gamma,# default 0.95
         "d0": args.threshold})#-0.667})
 
     def __init__(self, env):
@@ -120,6 +121,7 @@ class CPOAgent(object):
 
     def learn(self):
         config = self.config
+        print("gamma={}".format(config["gamma"]))
         start_time = time.time()
         numeptotal = 0
         i = 0
@@ -313,15 +315,15 @@ logging.getLogger().setLevel(logging.DEBUG)
 #env = Sim0(6)
 from i2rs.envs import Sim0, Sim2, Sim3, Sim4, Sim7
 if args.level == 0:
-    env = Sim0(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+    env = Sim0(dims=6, num_arms=6, max_episode_len=args.max_episode_len, seed=args.seed, negate_c=True)
 elif args.level ==2:
-    env = Sim2(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+    env = Sim2(dims=6, num_arms=6, max_episode_len=args.max_episode_len, seed=args.seed, negate_c=True)
 elif args.level ==3:
-    env = Sim3(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+    env = Sim3(dims=6, num_arms=6, max_episode_len=args.max_episode_len, seed=args.seed, negate_c=True)
 elif args.level == 4:
-    env = Sim4(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+    env = Sim4(dims=6, num_arms=6, max_episode_len=args.max_episode_len, seed=args.seed, negate_c=True)
 elif args.level == 7:
-    env = Sim7(dims=6, num_arms=6, max_episode_len=3, seed=args.seed, negate_c=True)
+    env = Sim7(dims=6, num_arms=6, max_episode_len=args.max_episode_len, seed=args.seed, negate_c=True)
 elif args.level == 10:
     from i2rs.envs import FlowControlSimulator
     env = FlowControlSimulator("/root/I2RS/search_logs.tsv", seed=args.seed, negate_c=True)

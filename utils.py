@@ -40,6 +40,10 @@ def rollout(env, agent, max_pathlength, n_timesteps):
                         "actions": np.array(actions)}
                 if constraints:
                     path["constraints"] = np.asarray(constraints)
+                    # a new setting required by zehong
+                    #length_free_c = np.sum(path["constraints"]) / float(len(path["constraints"]))
+                    #for i in range(len(path["constraints"])):
+                    #    path["constraints"][i] = length_free_c
                 paths.append(path)
                 agent.prev_action *= 0.0
                 agent.prev_obs *= 0.0
